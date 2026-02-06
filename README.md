@@ -1,2 +1,2 @@
 # Economic-Evaluation-dashboard
-Development of economic evaluation dashboard that takes into account how far an intervention extends people lives.
+Development of economic evaluation dashboard that takes into account how far an intervention extends people lives with regards to its cost and available budget.
