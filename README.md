@@ -1,6 +1,6 @@
-# Economic-Evaluation-dashboard
+## Economic-Evaluation-dashboard
 Development of economic evaluation dashboard that takes into account how far an intervention extends people lives with regards to its cost and available budget.
-# This code I worked out the logic behind the economic Evaluation, thus :
+
 
 ## Overview
 
