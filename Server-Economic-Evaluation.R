@@ -13,7 +13,7 @@ shape_file_tza <- st_read("Economic-Evaluation-dashboard/shapefiles/TZA_shapefil
 shape_file_tza <- st_transform(shape_file_tza, 4326)
 
 
-# Server
+# Server function 
 server <- function(input, output, session){
   
   
@@ -42,7 +42,7 @@ server <- function(input, output, session){
   
   
   # This is the processed data for the analysis (economic evaluation, ICER, NMB,etc.)
-processed_data <- reactive({
+  processed_data <- reactive({
     dt <- copy(data_tza)
     
     # Unit costs from UI
@@ -92,220 +92,162 @@ processed_data <- reactive({
     return(ds)
   })
   
-
-# CHECK ELIGIBILITY: This makes sure that all active interventions should  be eligible
-
-check_eligibility <- function(scenario_name_val) {
-  int_status <- unique(data_tza[
-    scenario_name == scenario_name_val & age_group == "0-100", 
-    .SD, 
-    .SDcols = c("admin_2", paste0("active_int_", int_names), 
-                paste0("eligible_int_", int_names))
-  ])
   
-  # Check if all active interventions are eligible
-  int_status[, all_eligible := TRUE]
-  for (int in int_names) {
-    active_col <- paste0("active_int_", int)
-    eligible_col <- paste0("eligible_int_", int)
-    int_status[get(active_col) == TRUE & get(eligible_col) == FALSE, 
-               all_eligible := FALSE]
+  # CHECK ELIGIBILITY: This makes sure that all active interventions should  be eligible
+  
+  check_eligibility <- function(scenario_name_val) {
+    int_status <- unique(data_tza[
+      scenario_name == scenario_name_val & age_group == "0-100", 
+      .SD, 
+      .SDcols = c("admin_2", paste0("active_int_", int_names), 
+                  paste0("eligible_int_", int_names))
+    ])
+    
+    # Check if all active interventions are eligible
+    int_status[, all_eligible := TRUE]
+    for (int in int_names) {
+      active_col <- paste0("active_int_", int)
+      eligible_col <- paste0("eligible_int_", int)
+      int_status[get(active_col) == TRUE & get(eligible_col) == FALSE, 
+                 all_eligible := FALSE]
+    }
+    
+    return(all(int_status$all_eligible))
   }
   
-  return(all(int_status$all_eligible))
-}
 
-
-winners <- reactive({
-  # Used EIR_mean as the representative data 
-  ds <- processed_data()[EIR_CI == "EIR_mean"]
+  # WINNERS: Greedy National Optimization Logic
+  winners <- reactive({
+    req(processed_data())
+    ds <- processed_data()[EIR_CI == "EIR_mean"]
+    
+    budget_curr <- ds[plan == input$ref_plan, sum(cost, na.rm = TRUE)]
+    budget_env  <- budget_curr * (1 + (input$budget_inc / 100))
+    eval_plan_name <- ifelse(input$ref_plan == "BAU", "NSP", "BAU")
+    
+    # This is the shared  OPTIMIZER 
+    optimize_national_plan <- function(target_budget, sort_col, filter_ce = FALSE) {
+      # Baseline: Everyone starts on Reference (bau)
+      current_plan <- ds[plan == input$ref_plan]
+      
+      # Potential Upgrades (improvements)
+      upgrades <- ds[plan == eval_plan_name]
+      if(filter_ce) upgrades <- upgrades[is.CE == TRUE]
+      
+      # Rank by  (NMB or Cases Averted)
+      upgrades <- upgrades[order(-get(sort_col))]
+      
+      current_total_cost <- sum(current_plan$cost, na.rm = TRUE)
+      
+      for(i in seq_len(nrow(upgrades))) {
+        candidate <- upgrades[i]
+        existing  <- current_plan[admin_2 == candidate$admin_2]
+        
+        # Calculate marginal cost to move from BAU to NSP
+        marginal_cost <- candidate$cost - existing$cost
+        
+        # Swap if we can afford it from the national pool
+        if((current_total_cost + marginal_cost) <= (target_budget + 0.1)) {
+          current_plan <- rbind(current_plan[admin_2 != candidate$admin_2], candidate)
+          current_total_cost <- current_total_cost + marginal_cost
+        }
+      }
+      return(current_plan)
+    }
+    
+    list(
+      ce   = optimize_national_plan(budget_curr, "NMB", filter_ce = TRUE),
+      opt  = optimize_national_plan(budget_curr, "cases_averted"),
+      vary = optimize_national_plan(budget_env, "cases_averted"),
+      curr = budget_curr, 
+      env  = budget_env
+    )
+  })
   
-  # Budget Calculations 
-  budget_curr <- ds[plan == input$ref_plan, sum(cost, na.rm = TRUE)]
-  budget_env  <- budget_curr * (1 + (input$budget_inc / 100))
-  
-  # Identify Evaluation Plan (example; if Ref is BAU, Eval is NSP)
-  eval_plan_name <- ifelse(input$ref_plan == "BAU", "NSP", "BAU")
-  
-  
-  # Finding the most Cost-Effective Plan (Highest NMB per District)
-  
-  # For every district, we pick the best cost effective scenario
-  p_ce <- ds[is.CE == TRUE & plan == eval_plan_name][order(admin_2, -NMB), .SD[1], by = admin_2]
-  
-  # If no scenario is CE for a district, it stays on Reference (BAU)
-  if(nrow(p_ce) < length(unique(ds$admin_2))) {
-    missing_districts <- setdiff(unique(ds$admin_2), p_ce$admin_2)
-    p_ce <- rbind(p_ce, ds[plan == input$ref_plan & admin_2 %in% missing_districts])
-  }
-  
-  
-  # Optimal Assessment ( This extracts the highest health gain per District)
-  p_opt <- ds[plan == eval_plan_name][order(admin_2, -cases_averted), .SD[1], by = admin_2]
-  
-  
-  # ID Optimal Allocation (Varying Budget)
-  
-  # Rank scenarios (Cases Averted per Dollar)
-  ds[, efficiency := cases_averted / cost_diff]
-  
-  # Pick the most efficient scenarios that fit the total National Budget Envelope
-  p_vary <- ds[plan == eval_plan_name][order(-efficiency)]
-  p_vary[, cum_cost := cumsum(cost)]
-  p_vary <- p_vary[cum_cost <= budget_env]
-  list(ce = p_ce, opt = p_opt, vary = p_vary, curr = budget_curr, env = budget_env)
-})
-
-
-render_map <- function(win_plan) {
-  req(nrow(win_plan) > 0)
-  
-  #  Get Referencing a  given plan 
-  
-  ref_data <- processed_data()[plan == input$ref_plan & EIR_CI == "EIR_mean"]
-  ref_names <- ref_data[, .SD[1], by = admin_2][, .(admin_2, scenario_name)]
-  
-  ref_ints <- get_int_names(ref_names)
-  win_ints <- get_int_names(win_plan)
-  
-  
-  ref_ints[, n_active := rowSums(.SD), .SDcols = patterns("active_int_")]
-  win_ints[, n_active_win := rowSums(.SD), .SDcols = patterns("active_int_")]
-  
-  map_data <- merge(ref_ints[, .(admin_2, n_active, active_ints)], 
-                    win_ints[, .(admin_2, n_active_win, active_ints_win = active_ints)], 
-                    by = "admin_2")
-  
-  # This is to show when an intervention is (Added, Removed, or Modified ) in a district
-  map_data[, change := fcase(
-    active_ints == active_ints_win, "No Change",
-    n_active_win > n_active, "Added Interventions",
-    n_active_win < n_active, "Removed Interventions",
-    active_ints != active_ints_win, "Mixed Interventions",
-    default = "No Change"
-  )]
-  
-  joined_sf <- merge(shape_file_tza, map_data, by = "admin_2")
-  
-  pal <- colorFactor(
-    palette = c("#2ca25f", "#FFFF00", "#de2d26", "#808080"), 
-    levels = c("Added Interventions", "Mixed Interventions", "Removed Interventions", "No Change")
-  )
-  
-  leaflet(joined_sf) %>% addProviderTiles(providers$CartoDB.Positron) %>%
-    addPolygons(fillColor = ~pal(change), weight = 1, color = "white", fillOpacity = 0.9,
-                label = ~paste0(admin_2, " | New Plan: ", active_ints_win)) %>%
-    addLegend(pal = pal, values = ~change, title = "Policy Shift")
-}
-
-
-# Output variables 
-
-
-# map 1 
-
-output$map_ce  <- renderLeaflet({ render_map(winners()$ce) })
-
-
-
-#Map 3: FACETED by interventions
-output$map_varying <- renderPlot({
-  win_details <- get_int_names(winners()$vary)
-  
-  long_data <- melt(
-    win_details,
-    id.vars = "admin_2",
-    measure.vars = patterns("active_int_")
-  )
-  long_data[, variable := gsub("active_int_", "", variable)]
-  
-  map_sf <- merge(shape_file_tza, long_data, by = "admin_2")
-  
-  ggplot(map_sf) +
-    geom_sf(aes(fill = value), color = "white", size = 0.2) +
-    facet_wrap(~variable, ncol = 4) +
-    scale_fill_manual(
-      values = c("TRUE" = "#2b8cbe", "FALSE" = "#f0f0f0"),
-      name = "Active"
-    ) +
-    theme_void() +
-    theme(strip.text = element_text(size = 11, face = "bold")) +
-    labs(subtitle = "Maximizing health outcomes within budget envelope")
-})
- 
-
-output$table_cea <- renderDT({
-  datatable(
-    get_int_names(processed_data()[EIR_CI == "EIR_mean"])[, .(
-      admin_2, scenario_name, active_ints, NMB, ICER, is.CE
+# Rendering the Map: 
+  render_map <- function(win_plan) {
+    req(nrow(win_plan) > 0)
+    
+    ref_data <- processed_data()[plan == input$ref_plan & EIR_CI == "EIR_mean"]
+    ref_names <- ref_data[, .SD[1], by = admin_2][, .(admin_2, scenario_name)]
+    
+    ref_ints <- get_int_names(ref_names)
+    win_ints <- get_int_names(win_plan)
+    
+    ref_ints[, n_active := rowSums(.SD), .SDcols = patterns("active_int_")]
+    win_ints[, n_active_win := rowSums(.SD), .SDcols = patterns("active_int_")]
+    
+    map_data <- merge(ref_ints[, .(admin_2, n_active, active_ints)], 
+                      win_ints[, .(admin_2, n_active_win, active_ints_win = active_ints)], 
+                      by = "admin_2")
+    
+    map_data[, change := fcase(
+      active_ints == active_ints_win, "No Change",
+      n_active_win > n_active, "Added Interventions",
+      n_active_win < n_active, "Removed Interventions",
+      active_ints != active_ints_win, "Mixed Interventions",
+      default = "No Change"
     )]
-  ) %>%
-    formatCurrency('NMB', "$") %>% formatRound('ICER', 2)
-})
-
-
-
-
- 
+    
+    joined_sf <- merge(shape_file_tza, map_data, by = "admin_2")
+    pal <- colorFactor(
+      palette = c("#2ca25f", "#756bb1", "#de2d26", "#feb24c"), 
+      levels = c("Added Interventions", "Mixed Interventions", "Removed Interventions", "No Change")
+    )
+    
+    leaflet(joined_sf) %>% addProviderTiles(providers$CartoDB.Positron) %>%
+      addPolygons(fillColor = ~pal(change), weight = 1, color = "white", fillOpacity = 0.9,
+                  label = ~paste0(admin_2, " | Recommended: ", active_ints_win)) %>%
+      addLegend(pal = pal, values = ~change, title = "Policy Shift")
+  }
+  
+  # Output variables 
+ # map 1 and 2 
+  output$map_ce  <- renderLeaflet({ render_map(winners()$ce) })
+  output$map_opt <- renderLeaflet({ render_map(winners()$opt) })
+  
+  
+  
+  #Map 3: FACETED by interventions
+  output$map_varying <- renderPlot({
+    win_details <- get_int_names(winners()$vary)
+    
+    long_data <- melt(
+      win_details,
+      id.vars = "admin_2",
+      measure.vars = patterns("active_int_")
+    )
+    long_data[, variable := gsub("active_int_", "", variable)]
+    
+    map_sf <- merge(shape_file_tza, long_data, by = "admin_2")
+    
+    ggplot(map_sf) +
+      geom_sf(aes(fill = value), color = "white", size = 0.2) +
+      facet_wrap(~variable, ncol = 4) +
+      scale_fill_manual(
+        values = c("TRUE" = "#2b8cbe", "FALSE" = "#f0f0f0"),
+        name = "Active"
+      ) +
+      theme_void() +
+      theme(strip.text = element_text(size = 11, face = "bold")) +
+      labs(subtitle = "Maximizing health outcomes within budget envelope")
+  })
+  
+  
+  output$table_cea <- renderDT({
+    datatable(
+      get_int_names(processed_data()[EIR_CI == "EIR_mean"])[, .(
+        admin_2, scenario_name, active_ints, NMB, ICER, is.CE
+      )]
+    ) %>%
+      formatCurrency('NMB', "$") %>% formatRound('ICER', 2)
+  })
+  
+  
+  
+  
+  
 }
-
-
-
-
 
 
 shinyApp(ui, server)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

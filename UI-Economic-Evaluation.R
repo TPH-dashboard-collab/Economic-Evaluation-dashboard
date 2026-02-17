@@ -1,5 +1,5 @@
 
-# UI - CEA Dashboard
+# UI - Cost Effective Analysis Dashboard
 
 ui <- dashboardPage( 
   dashboardHeader(title = "Malaria Economic Evaluation", titleWidth = 300),
@@ -56,8 +56,14 @@ ui <- dashboardPage(
             solidHeader = TRUE,
             status = "success",
             leafletOutput("map_ce", height = 500)
+          ),
+          box(
+            title = "2) Optimal Assessment Changes", 
+            width = 6, 
+            solidHeader = TRUE,
+            status = "primary",
+            leafletOutput("map_opt", height = 500)
           )
-          
         ),
         
         fluidRow(
