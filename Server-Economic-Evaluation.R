@@ -6,7 +6,7 @@ library(leaflet)
 library(lpSolve)
 
 
-
+# settings
 sub_level_col <- "admin_2"   # Column in CSV
 shp_district_col <- "admin_2" # Column in Shapefile
 
