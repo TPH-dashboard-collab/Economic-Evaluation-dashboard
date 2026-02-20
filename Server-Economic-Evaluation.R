@@ -78,7 +78,7 @@ calc_district_costs <- function(dt, ints, unit_costs, start_yr, end_yr) {
     dt_sub[, row_cost := row_cost + (nHost * get(act) * get(cov) * unit_costs[[int]])]
   }
   
-  # Include 'plan' in both aggregation steps
+  #Include 'plan' in both aggregation steps
   costs <- dt_sub[, .(sum_yr = sum(row_cost)), by = .(scenario_name, plan, admin_2, EIR_CI, seed)]
   costs <- costs[, .(avg_cost = mean(sum_yr)), by = .(scenario_name, plan, admin_2, EIR_CI)]
   
