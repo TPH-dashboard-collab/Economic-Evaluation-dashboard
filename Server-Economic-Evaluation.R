@@ -14,7 +14,7 @@ shp_district_col <- "admin_2" # Column in Shapefile
 
 data_tza <- fread("Economic-Evaluation-dashboard/tza_sample_data.csv") 
 
-# Loading my Shapefile and Outline
+# Loading my Shaplsefile and Outline
 shape_file_tza <- st_read("Economic-Evaluation-dashboard/shapefiles/TZA_shapefile_correctNamesDHIS2_Dist.shp") %>% 
   st_transform(4326) %>%
   rename(JOIN_TARGET = !!sym(shp_district_col)) # Renames the variable column to a fixed name
@@ -368,7 +368,8 @@ server <- function(input, output, session) {
     # Reshaping to long format and remove any NAs
     plot_dt_long <- plot_dt_grouped %>%
       pivot_longer(cols = -admin_2, names_to = "Intervention_Group", values_to = "ActiveStatus") %>%
-      #filter(!is.na(Intervention_Group)) # Removes the NA map
+      
+    # filter(!is.na(Intervention_Group)) # Removes the NA map
       filter(!is.na(Intervention_Group), !is.na(ActiveStatus)) %>%
       
       mutate(Intervention_Group = as.character(Intervention_Group))

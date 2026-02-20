@@ -11,7 +11,7 @@ ui <- dashboardPage(
       sliderInput("budget_adj", "Budget Change (%)", -30, 30, 0),
       
       # ONLY ONE SELECTOR NEEDED
-      # If user picks BAU, the server automatically optimizations for NSP
+      # If user picks BAU, the server automatically optimisations for NSP
       selectInput("ref_plan", "Reference Plan (Baseline)", choices = c("BAU", "NSP"), selected = "BAU"),
       
       hr(),
