@@ -1,3 +1,4 @@
+library(shiny)
 library(shinydashboard)
 ui <- dashboardPage(
   dashboardHeader(title = "Malaria Economic Evaluation", titleWidth = 300),
