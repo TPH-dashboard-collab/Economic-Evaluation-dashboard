@@ -17,7 +17,7 @@ ui <- dashboardPage(
       
       hr(),
       menuItem("Unit Costs (USD)", icon = icon("dollar-sign"),
-               uiOutput("cost_inputs") 
+               uiOutput("cgit ost_inputs")
       )
     )
   ),
