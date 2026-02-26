@@ -10,6 +10,7 @@ ui <- dashboardPage(
   dashboardSidebar(
     sidebarMenu(
       menuItem("Dashboard", tabName = "dash", icon = icon("dashboard")),
+      menuItem("Budget Planner", tabName = "planner", icon = icon("calculator")),
       hr(),
       numericInput("wtp", "Willingness to Pay (per case averted, USD)", 120, min = 0),
       sliderInput("years", "Simulation Years", min = 2026, max = 2030, value = c(2026, 2030), sep = ""),
@@ -41,14 +42,14 @@ ui <- dashboardPage(
       tabItem(tabName = "dash",
               # ROW 1: BUDGET OUTPUTS
               fluidRow(
-                valueBoxOutput("box_budget_curr", width = 4),
-                valueBoxOutput("box_budget_env", width = 4)
+                valueBoxOutput("box_budget_curr", width = 6),
+                valueBoxOutput("box_budget_env", width = 6)
               ),
-              box(
-                title = "Sub-national CEA Analytics", 
-                width = 12, 
-                DTOutput("table_cea")
-              ),
+              # box(
+              #   title = "Sub-national CEA Analytics", 
+              #   width = 12, 
+              #   DTOutput("table_cea")
+              # ),
               # ROW 2: MAPS
               fluidRow(
                 box(title = "1) Most Cost-Effective Plan Changes", width = 6, solidHeader = TRUE, status = "success", p("Displays the geographic shift from the baseline to the strategy maximizing economic value (Net Monetary Benefit).",
@@ -64,6 +65,23 @@ ui <- dashboardPage(
                 box(title = "3) Optimal Allocation for Varying Budget", width = 12, solidHeader = TRUE, status = "warning", p("Reveals the strategic national footprint of intervention groups optimized for the specified budget envelope.", 
                                                                                                                               style = "font-size: 14px; color: #666; font-weight: bold;"),
                     plotOutput("map_facets", height = 800))
+              )
+      ),
+      tabItem(tabName = "planner",
+              fluidRow(
+                box(title = "Budget Simulation Settings", width = 4, status = "warning", solidHeader = TRUE,
+                    p("Enter a specific budget amount to see the optimal distribution of interventions."),
+                    numericInput("user_budget_amount", "Total National Budget (USD):", 
+                                 value = 4500000000, min = 0, step = 100000000),
+                    actionButton("run_planner", "Run Optimization", icon = icon("play"), class = "btn-block btn-warning")
+                ),
+                valueBoxOutput("planner_health_box", width = 4),
+                valueBoxOutput("planner_cost_box", width = 4)
+              ),
+              fluidRow(
+                box(title = "Custom Strategic Allocation Map", width = 12, solidHeader = TRUE, status = "primary",
+                    p("This map reveals exactly which scenario should be deployed in each district to maximize health within your manually entered budget."),
+                    leafletOutput("map_planner", height = 600))
               )
       )
     )

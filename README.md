@@ -1,47 +1,82 @@
-## Economic-Evaluation-dashboard
-Development of economic evaluation dashboard that takes into account how far an intervention extends people lives with regards to its cost and available budget.
 
+## Malaria Economic Evaluation & Optimization Dashboard 
+Project Overview
 
-## Overview
+This dashboard is a decision-support tool designed to evaluate the cost-effectiveness of malaria intervention strategies at the sub-national level in Tanzania. It bridges the gap between epidemiological simulation data and health-economic policy by identifying optimal resource allocation strategies under fixed and varying budget constraints.
 
-This script performs a district-level cost-effectiveness analysis of 11 malaria interventions in Tanzania. It compares intervention scenarios to a Business-As-Usual (BAU) baseline and identifies optimal strategies under budget constraints.
+1. Data Structure
 
-The process:
+The analysis is performed on a panel dataset containing:
 
-Loads simulation and spatial data.
+Geographic Level: Admin-2 (Districts).
 
-Assigns intervention eligibility by district.
+Temporal Scope: Multi-year simulations (e.g., 2026–2030).
 
-Calculates total intervention costs per scenario.
+Interventions: 11 specific tools including Case Management (CM), iCCM, Larval Source Management (LSM), various Bednets (PBO, IG2, STD), SMC, PMC, IPTSc, IRS, and Vaccines.
 
-Aggregates costs and malaria cases.
+Uncertainty: Confidence intervals for transmission intensity (EIR_CI) and stochastic variation (seeds).
 
-Computes:
+2. Mathematical Framework
+A. Cost Calculation (Bottom-Up)
 
-Incremental Cost
+The cost of an intervention in a specific district is calculated using the formula:
+Cost = Population (nHost) × Coverage (%) × Unit Cost (USD) × Eligibility (0/1)
 
-Cases Averted
+Eligibility: A policy filter determining if a district is permitted to use a specific tool.
 
-ICER
+Ignore Active Logic: Following the policy-first approach, costs are driven by eligibility rather than raw simulation status.
 
-Net Monetary Benefit (NMB)
+B. Health Benefit (Incremental Impact)
 
-Identifies:
+Health impact is measured as Cases Averted using an "Odometer" logic:
 
-Most cost-effective plan (highest NMB)
+Period Burden: Cumulative Cases (End Year) - Cumulative Cases (Year Start - 1).
 
-Plan that averts the most cases
+Benefit Calculation: Reference Burden (BAU) - Scenario Burden (NSP).
 
-Visualizes results using:
+C. Economic Metrics
 
-Interactive Leaflet maps
+ICER (Incremental Cost-Effectiveness Ratio): The price tag per health gain.
+ICER = (Scenario Cost - Reference Cost) / Cases Averted.
 
-Faceted ggplot intervention maps
+NMB (Net Monetary Benefit): The total value added to society.
+NMB = (Cases Averted × Willingness to Pay) - Incremental Cost.
 
-Output
+is.CE (Cost-Effective): A binary flag where TRUE if NMB > 0 (or ICER < WTP).
 
-District-level optimal intervention portfolios
+3. Optimization Logic (The "Shared Wallet")
 
-Cost-effectiveness metrics (NMB, ICER)
+The dashboard uses Linear Programming (lpSolve) to identify the best national strategy. Unlike simple ranking, this approach looks at all 184 districts simultaneously to find the Global Maximum.
 
-Maps showing where interventions are added, removed, or deployed
+Objective: Maximize National Health (Cases Averted) or Value (NMB).
+
+Budget Constraint: The total sum of all district scenario costs must be 
+≤
+≤
+ the Budget Envelope.
+
+Exclusive Choice: Every district is attributed exactly one scenario (ensuring no district is left empty and no district is over-allocated).
+
+4. Visualizations & Interpretations
+Map 1: Most Cost-Effective Plan Changes
+
+Visualizes the geographic shift from the baseline to the strategy maximizing Net Monetary Benefit.
+
+Green: Districts where an upgrade (NSP) is recommended because it provides the highest value for money.
+
+Purple/Gray: Districts kept on the reference plan (BAU) due to budget limits or lower efficiency.
+
+Map 2: Optimal Assessment Changes
+
+Identifies where to reallocate resources to maximize Health Outcomes (Cases Averted) within the strictly fixed current budget.
+
+This map reveals how to get the most "health" out of the existing wallet without spending an extra dollar.
+
+Map 3: Grouped Strategy Footprint
+
+Reveals the national footprint of intervention groups optimized for a Flexible Budget Envelope.
+
+Grouping Logic: To simplify the strategy, similar tools are grouped (e.g., CM & iCCM, PMC & SMC).
+
+Mixture Detection: The legend distinguishes between districts receiving one tool in a group versus those receiving a "Both" mixture, using distinct color shades (e.g., Light Blue for CM Only, Dark Blue for Both).
+
