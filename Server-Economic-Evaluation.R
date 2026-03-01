@@ -9,13 +9,13 @@ library(dplyr)
 library(tidyr)
 library(lpSolve)
 
-#  DATA LOADING & PRE-PROCESSING
+#  data loading and pre-processing 
 
 data_tza <- fread("Economic-Evaluation-dashboard/tza_sample_data.csv")
 shape_file_tza <- st_read("Economic-Evaluation-dashboard/shapefiles/TZA_shapefile_correctNamesDHIS2_Dist.shp", quiet = TRUE) %>% 
   st_transform(4326)
 
-# Standardize geographic keys immediately
+# Standardize geographic keys
 sub_level_col <- "admin_2"
 shape_file_tza <- shape_file_tza %>% 
   rename(JOIN_TARGET = admin_2) %>%
@@ -27,7 +27,7 @@ tza_outline <- st_union(shape_file_tza)
 all_active_cols <- names(data_tza)[grep("^active_int_", names(data_tza))]
 int_names <- gsub("active_int_", "", all_active_cols)
 
-# # Create a fixed set of eligibility columns (one per district)
+# Ensure Eligibility columns exist
 # set.seed(123)
 # unique_subs <- unique(data_tza[[sub_level_col]])
 # for(int in int_names) {
@@ -40,7 +40,7 @@ int_names <- gsub("active_int_", "", all_active_cols)
 # }
 
 
-#  OPTIMIZATION ENGINE 
+# OPTIMIZATION ENGINE
 
 OptimalAllocation <- function(df, budget_env, region_name = "admin_2", policy_name = "scenario_name",
                               cost_name = "avg_cost", health_name = "averted", optim_dir = "max") {
@@ -55,31 +55,30 @@ OptimalAllocation <- function(df, budget_env, region_name = "admin_2", policy_na
   objective_coeffs <- working_df[[health_name]]
   constr_budget_env <- matrix(working_df[[cost_name]], nrow = 1, byrow = TRUE)
   
-  # Ensure exactly one scenario per region
-  
   constr_per_region <- matrix(0, nrow = unique(working_df$N_regions), ncol = nrow(working_df))
   for(i in 1:nrow(constr_per_region)) {
     constr_per_region[i, c(df_idx$start[i]:df_idx$stop[i])] <- 1
   }
   
-  # Solver
   solution <- lpSolve::lp(direction = optim_dir, objective.in = objective_coeffs, 
                           const.mat = rbind(constr_budget_env, constr_per_region), 
                           const.dir = c("<=", rep("=", nrow(constr_per_region))), 
                           const.rhs = c(budget_env, rep(1, nrow(constr_per_region))))
   
   working_df[, policy_allocation := solution$solution]
-  return(working_df[policy_allocation > 0.99]) # Snap to binary choices
+  return(working_df[policy_allocation > 0.99])
 }
 
 
-
-
-#  SERVER
+# SERVER
 
 server <- function(input, output, session) {
   
-  # Translates binary intervention status columns into a readable text summary (for the maps) 
+  # Extracts the single most optimal intervention scenario for each district from the linear programming results.
+  get_best_allocation <- function(opt_res) {
+    opt_res[policy_allocation > 0, .SD[which.max(policy_allocation)], by = region]
+  }
+  # Creates a human-readable summary string of all active interventions (e.g., "IRS, SMC") for every simulated scenario in the 2026 data.
   get_scen_summary <- function() {
     temp <- unique(data_tza[year == 2026, .SD, .SDcols = c("admin_2", "scenario_name", all_active_cols)])
     temp[, active_summary := apply(.SD, 1, function(row) {
@@ -94,14 +93,13 @@ server <- function(input, output, session) {
     return(left_join(shape_file_tza, data_clean, by = "join_id"))
   }
   
-  #  Making the data reactive 
+  # This reactive calculates the total intervention costs and cumulative cases averted for each scenario over the user-selected time horizon.
+  # It performs an incremental analysis by comparing every scenario against the chosen reference plan to determine additional costs and health gains.
   metrics_data <- reactive({
     req(input$wtp, input$years)
     u_costs <- list(CM=input$u_CM, ICCM=input$u_ICCM, SMC=input$u_SMC, PMC=input$u_PMC, IRS=input$u_IRS,
                     LSM=input$u_LSM, Vaccine=input$u_Vaccine, IPTSc=input$u_IPTSc, 
                     STD_Nets=input$u_STD_Nets, PBO_Nets=input$u_PBO_Nets, IG2_Nets=input$u_IG2_Nets)
-    
-    # Cost math: Pop * Active * Coverage * Price
     
     dt <- copy(data_tza)[year >= input$years[1] & year <= input$years[2]]
     dt[, r_cost := 0]
@@ -111,80 +109,54 @@ server <- function(input, output, session) {
     }
     costs <- dt[, .(avg_cost = mean(sum(r_cost))), by = .(scenario_name, plan, admin_2, EIR_CI)]
     
-    # Averaging the impact 
     dt_end <- data_tza[year == input$years[2], .(c_e = mean(cum_nUncomp)), by = .(scenario_name, plan, admin_2, EIR_CI)]
     dt_st  <- data_tza[year == (input$years[1]-1), .(c_s = mean(cum_nUncomp)), by = .(scenario_name, plan, admin_2, EIR_CI)]
     impact <- merge(dt_end, dt_st, by = c("scenario_name", "plan", "admin_2", "EIR_CI"), all.x=T)
-    impact[, cases_in_period := c_e - fifelse(is.na(c_s), 0, c_s)]
+    impact[, averted_period := c_e - fifelse(is.na(c_s), 0, c_s)]
     
     m <- merge(impact, costs, by = c("scenario_name", "plan", "admin_2", "EIR_CI"))
-    ref <- m[plan == input$ref_plan, .(admin_2, EIR_CI, r_c = cases_in_period, r_cost = avg_cost)]
+    ref <- m[plan == input$ref_plan, .(admin_2, EIR_CI, r_c = averted_period, r_cost = avg_cost)]
     m <- merge(m, ref, by = c("admin_2", "EIR_CI"))
-    m[, `:=`(averted = r_c - cases_in_period, cost_diff = avg_cost - r_cost)]
+    
+    m[, `:=`(averted = r_c - averted_period, cost_diff = avg_cost - r_cost)]
     m[, `:=`(NMB = (averted * input$wtp) - cost_diff, is_CE = ((averted * input$wtp) - cost_diff) >= 0)]
-
-    # m <- merge(impact, costs, by = c("scenario_name", "plan", "admin_2", "EIR_CI"))
-    # ref <- m[plan == input$ref_plan, .(admin_2, EIR_CI, r_c = cases_in_period, r_cost = avg_cost)]
-    # m <- merge(m, ref, by = c("admin_2", "EIR_CI"))
-    # 
-    # # PERFORM ALL CALCULATIONS IN ONE STEP
-    # m[, `:=`(
-    #   averted   = r_c - cases_in_period,
-    #   cost_diff = avg_cost - r_cost
-    # )]
-    # 
-    # m[, `:=`(
-    #   NMB   = (averted * input$wtp) - cost_diff,
-    #   is_CE = ((averted * input$wtp) - cost_diff) >= 0,
-    #   ICER  = cost_diff / averted
-    # )]
-    # 
+    m[, ICER := cost_diff / averted]
     return(m)
   })
   
   budget_metrics <- reactive({
     req(input$ref_plan, metrics_data())
     target_p <- ifelse(input$ref_plan == "BAU", "NSP", "BAU")
+    # budget_curr is the cost of Plan A (the baseline/reference)
     curr <- metrics_data()[plan == input$ref_plan & EIR_CI == "EIR_mean", sum(avg_cost, na.rm = TRUE)]
     list(curr = curr, env = curr * (1 + (input$budget_adj/100)), target = target_p)
   })
   
-  # map logic: the function switches for both the cases averted and NMB to the optimizer 
-  render_optimized_map <- function(goal) {
+  # Generates an interactive Leaflet map that visualizes the optimization results by categorizing districts into either the baseline (BAU) or the upgraded intervention plan (NSP)
+  render_optimized_leaflet <- function(maximize_goal) {
     req(budget_metrics())
     res_mean <- metrics_data()[EIR_CI == "EIR_mean"]
     
-    #  Running  LP Solver
     opt_res <- OptimalAllocation(df = res_mean, budget_env = budget_metrics()$curr, 
                                  region_name = "admin_2", policy_name = "scenario_name", 
-                                 cost_name = "avg_cost", health_name = goal, optim_dir = "max")
+                                 cost_name = "avg_cost", health_name = maximize_goal, optim_dir = "max")
     
-    #  Getting the full list of scenario definitions (BAU and NSP)
+    opt_choices <- get_best_allocation(opt_res)
     lookup <- get_scen_summary()
-    
-    #  Getting the BAU definitions specifically to use as a fallback
-    bau_defs <- lookup[scenario_name == tolower(input$ref_plan)]
-    
-    #  To identify the optimizers
-    opt_choices <- merge(opt_res[, .(admin_2 = region, scenario_name = policy)], 
+    opt_choices <- merge(opt_choices[, .(admin_2 = region, scenario_name = policy)], 
                          lookup, by = c("admin_2", "scenario_name"), all.x = TRUE)
     
-    # Create the complete map table
     all_districts <- data.table(admin_2 = unique(data_tza$admin_2))
     comparison <- merge(all_districts, opt_choices, by = "admin_2", all.x = TRUE)
     
-    # If the solver skipped a district, merge in the ACTUAL BAU scenarios
-    comparison <- merge(comparison, bau_defs[, .(admin_2, bau_summary = active_summary)], by = "admin_2", all.x = TRUE)
+    bau_info <- lookup[scenario_name == tolower(input$ref_plan)]
+    comparison <- merge(comparison, bau_info[, .(admin_2, bau_summary = active_summary)], by = "admin_2", all.x = TRUE)
     
-    # If 'active_summary' is missing, we use the real 'bau_summary' from the data
+    comparison[, final_plan := ifelse(is.na(scenario_name) | scenario_name == tolower(input$ref_plan), "BAU", "NSP")]
     comparison[, final_tools := ifelse(is.na(active_summary), bau_summary, active_summary)]
-    comparison[, final_plan := ifelse(is.na(scenario_name), "BAU", "NSP")]
     
-    # Joining with Shapefile
     map_obj <- get_map_obj(comparison) %>%
-      mutate(
-        disp_label = lapply(paste0("<b>", JOIN_TARGET, "</b><br>Plan: ", final_plan, "<br>Tools: ", final_tools), htmltools::HTML)
-      )
+      mutate(disp_label = lapply(paste0("<b>", JOIN_TARGET, "</b><br>Plan: ", final_plan, "<br>Tools: ", final_tools), htmltools::HTML))
     
     pal <- colorFactor(palette = c("#756bb1", "#2ca25f"), levels = c("BAU", "NSP"))
     
@@ -193,121 +165,106 @@ server <- function(input, output, session) {
                   highlightOptions = highlightOptions(weight = 3, color = "#666", bringToFront = TRUE)) %>%
       addLegend(pal = pal, values = c("BAU", "NSP"), title = "Optimal Action")
   }
-  output$map_ce  <- renderLeaflet({ render_optimized_map("NMB") })
-  output$map_opt <- renderLeaflet({ render_optimized_map("averted") })
   
-   # output$map_facets <- renderPlot({
-   #   req(budget_metrics())
-   #   opt_res <- OptimalAllocation(df = metrics_data()[EIR_CI == "EIR_mean"], budget_env = budget_metrics()$env,
-   #                               region_name = "admin_2", policy_name = "scenario_name", cost_name = "avg_cost")
-   # 
-   #   scen_info <- data_tza[year == 2026, .SD, .SDcols = c("admin_2", "scenario_name", all_active_cols)]
-   #   plot_dt <- left_join(as.data.frame(opt_res), scen_info, by = c("region" = "admin_2", "policy" = "scenario_name")) %>%
-   #     mutate(`CM & ICCM` = active_int_CM | active_int_ICCM, `PMC & SMC` = active_int_PMC | active_int_SMC,
-   #            `Nets (IG2/PBO/STD)` = active_int_IG2_Nets | active_int_PBO_Nets | active_int_STD_Nets) %>%
-   #     select(admin_2 = region, `CM & ICCM`, `PMC & SMC`, `Nets (IG2/PBO/STD)`, LSM=active_int_LSM, Vaccine=active_int_Vaccine, IPTSc=active_int_IPTSc, IRS=active_int_IRS)
-   # 
-   #   long_data <- pivot_longer(plot_dt, cols = -admin_2, names_to = "Group", values_to = "Status") %>% filter(!is.na(Group))
-   #   map_obj <- get_map_obj(long_data) %>% filter(!is.na(Group))
-   # 
-   #   ggplot(map_obj) + geom_sf(data = tza_outline, fill = "#f2f2f2", color = "gray80", size = 0.1) +
-   #     geom_sf(aes(fill = Status), color = NA) + facet_wrap(~Group, ncol = 3, drop = TRUE) +
-   #     scale_fill_manual(values = c("TRUE" = "#2b8cbe", "FALSE" = "transparent"), labels = c("TRUE" = "Deployed", "FALSE" = "Not Deployed"), name = "Status") +
-   #     theme_void() + theme(strip.text = element_text(size = 12, face = "bold"), legend.position = "bottom")
-   # })
-
-   output$map_facets <- renderPlot({
-     req(budget_metrics())
-     res_mean <- metrics_data()[EIR_CI == "EIR_mean"]
+  output$map_ce  <- renderLeaflet({ render_optimized_leaflet("NMB") })
+  output$map_opt_assess <- renderLeaflet({ render_optimized_leaflet("averted") })
   
-     opt_res <- OptimalAllocation(
-       df = res_mean, budget_env = budget_metrics()$env, region_name = "admin_2",
-       policy_name = "scenario_name", cost_name = "avg_cost", health_name = "averted", optim_dir = "max"
-     )
+  # output$map_facets <- renderPlot({
+  #   req(budget_metrics())
+  #   opt_res <- OptimalAllocation(df = metrics_data()[EIR_CI == "EIR_mean"], budget_env = budget_metrics()$env, 
+  #                                region_name = "admin_2", policy_name = "scenario_name", cost_name = "avg_cost")
+  #   
+  #   opt_choices <- get_best_allocation(opt_res)
+  #   scen_info <- data_tza[year == 2026, .SD, .SDcols = c("admin_2", "scenario_name", all_active_cols)]
+  #   plot_dt <- left_join(as.data.frame(opt_choices), scen_info, by = c("region" = "admin_2", "policy" = "scenario_name")) %>%
+  #     mutate(`CM & ICCM` = factor(case_when(active_int_CM & active_int_ICCM ~ "Both", active_int_CM ~ "CM Only", active_int_ICCM ~ "iCCM Only", TRUE ~ "None")),
+  #            `PMC & SMC` = factor(case_when(active_int_PMC & active_int_SMC ~ "Both", active_int_PMC ~ "PMC Only", active_int_SMC ~ "SMC Only", TRUE ~ "None")),
+  #            `Nets` = factor(case_when((active_int_IG2_Nets + active_int_PBO_Nets + active_int_STD_Nets) > 1 ~ "Multiple", active_int_IG2_Nets ~ "IG2", active_int_PBO_Nets ~ "PBO", active_int_STD_Nets ~ "STD", TRUE ~ "None")),
+  #            LSM = factor(ifelse(active_int_LSM, "Deployed", "None")),
+  #            Vaccine = factor(ifelse(active_int_Vaccine, "Deployed", "None")),
+  #            IPTSc = factor(ifelse(active_int_IPTSc, "Deployed", "None")),
+  #            IRS = factor(ifelse(active_int_IRS, "Deployed", "None"))) %>%
+  #     select(admin_2 = region, `CM & ICCM`, `PMC & SMC`, Nets, LSM, Vaccine, IPTSc, IRS)
+  #   
+  #   plot_dt_long <- pivot_longer(plot_dt, cols = -admin_2, names_to = "Group", values_to = "Status") %>% filter(Status != "None")
+  #   map_obj <- get_map_obj(plot_dt_long) %>% filter(!is.na(Group))
+  #   
+  #   ggplot(map_obj) + geom_sf(data = tza_outline, fill = "#f2f2f2", color = "gray90", size = 0.1) +
+  #     geom_sf(aes(fill = Status), color = NA) + facet_wrap(~Group, ncol = 3, drop = TRUE) +
+  #     scale_fill_brewer(palette = "Set1", name = "Status") + theme_void() + 
+  #     theme(strip.text = element_text(size = 12, face = "bold"), legend.position = "bottom")
+  # })
+  # 
+  # 
   
-     opt_choices <- get_best_allocation(opt_res)
-     scen_info <- data_tza[year == 2026, .SD, .SDcols = c("admin_2", "scenario_name", all_active_cols)]
+  output$map_facets <- renderPlot({
+    req(budget_metrics())
+    
+    # Optimization 
+    opt_res <- OptimalAllocation(df = metrics_data()[EIR_CI == "EIR_mean"], 
+                                 budget_env = budget_metrics()$env, 
+                                 region_name = "admin_2", policy_name = "scenario_name", cost_name = "avg_cost")
+    
+    opt_choices <- get_best_allocation(opt_res)
+    scen_info <- data_tza[year == 2026, .SD, .SDcols = c("admin_2", "scenario_name", all_active_cols)]
+    
+    # Data Prep for plotting
+    plot_dt <- left_join(as.data.frame(opt_choices), scen_info, by = c("region" = "admin_2", "policy" = "scenario_name")) %>%
+      mutate(
+        `CM & ICCM` = factor(case_when(active_int_CM & active_int_ICCM ~ "Both", active_int_CM ~ "CM Only", active_int_ICCM ~ "iCCM Only", TRUE ~ "None")),
+        `PMC & SMC` = factor(case_when(active_int_PMC & active_int_SMC ~ "Both", active_int_PMC ~ "PMC Only", active_int_SMC ~ "SMC Only", TRUE ~ "None")),
+        `Nets` = factor(case_when((active_int_IG2_Nets + active_int_PBO_Nets + active_int_STD_Nets) > 1 ~ "Multiple", active_int_IG2_Nets ~ "IG2", active_int_PBO_Nets ~ "PBO", active_int_STD_Nets ~ "STD", TRUE ~ "None")),
+        LSM = factor(ifelse(active_int_LSM, "Deployed", "None")),
+        Vaccine = factor(ifelse(active_int_Vaccine, "Deployed", "None")),
+        IPTSc = factor(ifelse(active_int_IPTSc, "Deployed", "None")),
+        IRS = factor(ifelse(active_int_IRS, "Deployed", "None"))
+      ) %>%
+      select(admin_2 = region, `CM & ICCM`, `PMC & SMC`, Nets, LSM, Vaccine, IPTSc, IRS)
+    
+    plot_dt_long <- pivot_longer(plot_dt, cols = -admin_2, names_to = "Group", values_to = "Status") %>% 
+      filter(Status != "None")
+    
+    map_obj <- get_map_obj(plot_dt_long) %>% filter(!is.na(Group))
+    
+    
+    # We define specific colors for each status to ensure consistency across facets
+    status_colors <- c(
+      # Case Management (Reds)
+      "Both" = "#7b241c", "CM Only" = "#c0392b", "iCCM Only" = "#e74c3c",
+      # Nets (Blues)
+      "PBO" = "#21618c", "IG2" = "#2e86c1", "STD" = "#5dade2", "Multiple" = "#154360",
+      # SMC/PMC (Purples/Greens)
+      "SMC Only" = "#6c3483", "PMC Only" = "#1d8348",
+      # Binary Deployed (Teals/Dark Gray)
+      "Deployed" = "#138d75"
+    )
+    
+    
+    ggplot(map_obj) + 
+      # Base layer: Background of Tanzania (Light Gray)
+      geom_sf(data = tza_outline, fill = "#f2f2f2", color = "white", size = 0.05) +
+      # Active Footprint layer
+      geom_sf(aes(fill = Status), color = NA) + 
+      facet_wrap(~Group, ncol = 3, drop = TRUE) +
+      # Use the manual scale instead of Brewer
+      scale_fill_manual(values = status_colors, name = "Intervention Status") + 
+      theme_void() + 
+      theme(
+        strip.text = element_text(size = 13, face = "bold", margin = margin(b = 10)),
+        legend.position = "bottom",
+        legend.title = element_text(face = "bold"),
+        panel.spacing = unit(2, "lines"), # Increase space between maps
+        plot.margin = margin(20, 20, 20, 20)
+      ) +
+      guides(fill = guide_legend(nrow = 2, byrow = TRUE)) # Makes legend cleaner
+  })
   
-     plot_dt <- left_join(as.data.frame(opt_choices), scen_info, by = c("region" = "admin_2", "policy" = "scenario_name"))
-  
-     # 1. CREATE CATEGORICAL GROUPS (Instead of TRUE/FALSE)
-     plot_dt_grouped <- plot_dt %>%
-       mutate(
-         `CM & ICCM` = case_when(
-           active_int_CM & active_int_ICCM ~ "Both",
-           active_int_CM ~ "CM Only",
-           active_int_ICCM ~ "iCCM Only",
-           TRUE ~ "None"
-         ),
-         `PMC & SMC` = case_when(
-           active_int_PMC & active_int_SMC ~ "Both",
-           active_int_PMC ~ "PMC Only",
-           active_int_SMC ~ "SMC Only",
-           TRUE ~ "None"
-         ),
-         `Nets (IG2/PBO/STD)` = case_when(
-           (active_int_IG2_Nets + active_int_PBO_Nets + active_int_STD_Nets) > 1 ~ "Multiple Types",
-           active_int_IG2_Nets ~ "IG2 Only",
-           active_int_PBO_Nets ~ "PBO Only",
-           active_int_STD_Nets ~ "STD Only",
-           TRUE ~ "None"
-         ),
-         # Individual ones stay binary but labeled for the legend
-         LSM = ifelse(active_int_LSM, "Active", "None"),
-         Vaccine = ifelse(active_int_Vaccine, "Active", "None"),
-         IPTSc = ifelse(active_int_IPTSc, "Active", "None"),
-         IRS = ifelse(active_int_IRS, "Active", "None")
-       ) %>%
-       select(admin_2 = region, `CM & ICCM`, `PMC & SMC`, `Nets (IG2/PBO/STD)`, LSM, Vaccine, IPTSc, IRS)
-  
-     # 2. Reshape to long
-     plot_dt_long <- plot_dt_grouped %>%
-       pivot_longer(cols = -admin_2, names_to = "Group", values_to = "Status") %>%
-       filter(Status != "None") # Removes the "False/None" areas to keep maps clean
-  
-     map_obj <- get_map_obj(plot_dt_long) %>% filter(!is.na(Group))
-  
-     # 3. Plot with multi-color palette
-     ggplot(map_obj) +
-       geom_sf(data = tza_outline, fill = "#f2f2f2", color = "gray95", size = 0.1) +
-       geom_sf(aes(fill = Status), color = NA) +
-       facet_wrap(~Group, ncol = 3, drop = TRUE) +
-       # We use a broad palette to cover all the different labels we created
-       scale_fill_manual(values = c(
-         "Active" = "#2b8cbe",         # Individual tools
-         "CM Only" = "#74add1",        # CM Group
-         "iCCM Only" = "#abd9e9",
-        "Both" = "#084594",
-         "PMC Only" = "#f46d43",       # PMC/SMC Group
-         "SMC Only" = "#fdae61",
-         "Both PMC & SMC" = "#a50026",
-         "IG2 Only" = "#7fbc41",       # Nets Group
-         "PBO Only" = "#4d9221",
-         "STD Only" = "#276419",
-         "Multiple Types" = "#00441b"
-       ), name = "Deployment Detail") +
-       theme_void() +
-    theme(strip.text = element_text(size = 12, face = "bold"),
-             legend.position = "bottom",
-             plot.title = element_text(hjust = 0.5, size = 16, face = "bold")) +
-      labs(title = "Strategy Footprint: Intervention Mix Detail")
-   })
-
-    # OUTPUTS 
-  output$box_budget_curr <- renderValueBox({ valueBox(paste0("$", format(round(budget_metrics()$curr), big.mark=",")), paste("Current Budget:", input$ref_plan), icon = icon("wallet"), color = "blue") })
-  output$box_budget_env  <- renderValueBox({ valueBox(paste0("$", format(round(budget_metrics()$env), big.mark=",")), "Budget Envelope", icon = icon("envelope"), color = "purple") })
- # output$table_cea <- renderDT({ datatable(metrics_data()[EIR_CI == "EIR_mean", .(admin_2, scenario_name, plan, NMB, ICER, is_CE)]) %>% formatCurrency('NMB', "$") %>% formatRound('ICER', 2) })
-  
-  
-  #  BUDGET PLANNER LOGIC 
-  
-  # Reactive to run optimization only when button is clicked
+  # Budget planner reactive 
   planner_results <- eventReactive(input$run_planner, {
     req(metrics_data())
     res_mean <- metrics_data()[EIR_CI == "EIR_mean"]
     
-    # Runing  LP Solver using the manual budget input
-    # We maximize Health (averted) here to give the 'safest' plan
+    #  Run Optimization
     opt_res <- OptimalAllocation(
       df = res_mean, 
       budget_env = input$user_budget_amount,
@@ -318,116 +275,51 @@ server <- function(input, output, session) {
       optim_dir = "max"
     )
     
-    # Join with intervention details for labels
     lookup <- get_scen_summary()
-    res <- merge(opt_res[, .(admin_2 = region, scenario_name = policy, cost_val = avg_cost, health_val = averted)], 
-                 lookup, by = c("admin_2", "scenario_name"), all.x = TRUE)
-    return(res)
+    bau_info <- lookup[scenario_name == tolower(input$ref_plan)]
+    all_districts <- data.table(admin_2 = unique(data_tza$admin_2))
+    
+    
+    # If the solver returns 0 rows, it means we must stay on BAU for everything
+    if(nrow(opt_res) == 0) {
+      # Use the BAU baseline for every district
+      final_choices <- res_mean[plan == input$ref_plan, .(admin_2, scenario_name, cost_val = avg_cost, health_val = 0)]
+    } else {
+      # Use the Optimized selection
+      final_choices <- opt_res[, .(admin_2 = region, scenario_name = policy, cost_val = avg_cost, health_val = averted)]
+    }
+    
+    # Final Merge for Map Labels
+    comparison <- merge(all_districts, final_choices, by = "admin_2", all.x = TRUE)
+    comparison <- merge(comparison, lookup, by = c("admin_2", "scenario_name"), all.x = TRUE)
+    
+    # Adding BAU fallback names for inteventions
+    comparison <- merge(comparison, bau_info[, .(admin_2, bau_summary = active_summary)], by = "admin_2", all.x = TRUE)
+    comparison[, final_tools := ifelse(is.na(active_summary), bau_summary, active_summary)]
+    comparison[, final_plan := ifelse(scenario_name == tolower(input$ref_plan), "BAU", "NSP")]
+    
+    return(comparison)
   })
   
-  
-  # Renders the Planner Map
   output$map_planner <- renderLeaflet({
+    req(planner_results())
     data <- planner_results()
-    
-    # 1. Categorize for coloring: Ensure "nsp" becomes Green and "bau" becomes Purple
-    # We standardize the names to uppercase BAU/NSP to match the palette
-    data[, color_group := ifelse(scenario_name == "bau", "BAU", "NSP")]
-    
     map_obj <- get_map_obj(data) %>%
-      mutate(disp_label = lapply(paste0("<b>", JOIN_TARGET, "</b><br>Budget Allocation: ", scenario_name, "<br>Tools: ", active_summary), htmltools::HTML))
-    
-    # 2. Defining the palette: Purple for BAU, Green for NSP
-    pal <- colorFactor(
-      palette = c("#756bb1", "#2ca25f"), 
-      levels = c("BAU", "NSP")
-    )
-    
+      mutate(disp_label = lapply(paste0("<b>", JOIN_TARGET, "</b><br>Plan: ", final_plan, "<br>Tools: ", final_tools), htmltools::HTML))
+    pal <- colorFactor(palette = c("#756bb1", "#2ca25f"), levels = c("BAU", "NSP"))
     leaflet(map_obj) %>% addProviderTiles(providers$CartoDB.PositronNoLabels) %>%
-      addPolygons(
-        fillColor = ~pal(color_group), # Use the color_group for the fill
-        weight = 1, color = "white", fillOpacity = 0.7, label = ~disp_label,
-        highlightOptions = highlightOptions(weight = 3, color = "#666", bringToFront = TRUE)
-      ) %>%
-      addLegend(pal = pal, values = c("BAU", "NSP"), title = "Strategy")
+      addPolygons(fillColor = ~pal(final_plan), weight = 1, color = "white", fillOpacity = 0.7, label = ~disp_label,
+                  highlightOptions = highlightOptions(weight = 3, color = "#666", bringToFront = TRUE)) %>%
+      addLegend(pal = pal, values = c("BAU", "NSP"), title = "Planner Strategy")
   })
   
+  output$planner_health_box <- renderValueBox({ valueBox(format(round(sum(planner_results()$health_val, na.rm=T)), big.mark=","), "Total Cases Averted", color = "green") })
+  output$planner_cost_box <- renderValueBox({ valueBox(paste0("$", format(round(sum(planner_results()$cost_val, na.rm=T)), big.mark=",")), "Actual Plan Cost", color = "blue") })
   
-  # Render Planner Value Boxes
-  output$planner_health_box <- renderValueBox({
-    val <- sum(planner_results()$health_val, na.rm = TRUE)
-    valueBox(format(round(val), big.mark=","), "Total Cases Averted", icon = icon("heartbeat"), color = "green")
-  })
-  
-  output$planner_cost_box <- renderValueBox({
-    val <- sum(planner_results()$cost_val, na.rm = TRUE)
-    valueBox(paste0("$", format(round(val), big.mark=",")), "Actual Plan Cost", icon = icon("money-bill-wave"), color = "blue")
-  })
+  # Display from the dashboard 
+  output$box_budget_curr <- renderValueBox({ valueBox(paste0("$", format(round(budget_metrics()$curr), big.mark=",")), paste("Current Budget:", input$ref_plan), icon = icon("wallet"), color = "blue") })
+  output$box_budget_env <- renderValueBox({ valueBox(paste0("$", format(round(budget_metrics()$env), big.mark=",")), "Budget Envelope", icon = icon("envelope"), color = "purple") })
+  output$table_cea <- renderDT({ datatable(metrics_data()[EIR_CI == "EIR_mean", .(admin_2, scenario_name, plan, NMB, ICER, is_CE)]) %>% formatCurrency('NMB', "$") %>% formatRound('ICER', 2) })
 }
 
 shinyApp(ui, server)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
