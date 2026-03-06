@@ -16,7 +16,7 @@ data_tza1 <- fread("Economic-Evaluation-dashboard/TZ_subset_10regions_1seed.csv"
 shape_file_tza <- st_read("Economic-Evaluation-dashboard/shapefiles/TZA_shapefile_correctNamesDHIS2_Dist.shp", quiet = TRUE) %>%
   st_transform(4326)
 
-#  Geographic key standardization  
+#  Geographic  standardization  
 shape_file_tza <- shape_file_tza %>%
   rename(JOIN_TARGET = admin_2) %>%
   mutate(join_id = toupper(trimws(as.character(JOIN_TARGET))))
