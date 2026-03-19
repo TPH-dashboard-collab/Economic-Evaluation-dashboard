@@ -1,6 +1,9 @@
+
+
 library(shiny)
 library(shinydashboard)
 library(leaflet)
+library(plotly)
 library(DT)
 
 ui <- dashboardPage(
@@ -19,16 +22,19 @@ ui <- dashboardPage(
                                "Under 5 (0-5)"    = "0-5",
                                "All"              = "all"),
                   selected = "0-100"),
-      helpText("Select the age group",
+      helpText("Select the age group to use for cases averted calculations.",
                style = "font-size: 11px; color: #aaa; margin-top: -8px;"),
-      sliderInput("budget_adj", "Budget Change (%)", -30, 30, 0),
-      helpText("Adjusts the budget envelope",
+      sliderInput("budget_adj", "Budget Change (%)", -30, 10, 0),
+      helpText("Adjusts the budget envelope relative to BAU. Drives Maps 1 & 2, 
+                Tornado charts, Facet Map, and Budget Sensitivity tab.",
                style = "font-size: 11px; color: #aaa; margin-top: -8px;"),
       selectInput("ref_plan", "Select Reference Plan",
                   choices  = c("Current Practice (BAU)" = "BAU",
                                "National Strategic Plan (NSP)" = "NSP"),
                   selected = "BAU"),
-      helpText("The reference plan",
+      helpText("The reference plan sets the health counterfactual — cases averted are measured 
+                relative to this plan. The budget envelope is always anchored to BAU cost, 
+                ensuring fair comparison across reference plans.",
                style = "font-size: 11px; color: #aaa; margin-top: -8px;"),
       
       hr(),
@@ -56,12 +62,12 @@ ui <- dashboardPage(
     "))),
     
     tabItems(
-      #  DASHBOARD TAB 
+      # --- DASHBOARD TAB ---
       tabItem(tabName = "dash",
               
               tabsetPanel(id = "dash_tabs", type = "tabs",
                           
-                          # SUB-TAB 1: OVERVIEW 
+                          # ── SUB-TAB 1: OVERVIEW ──────────────────────────────────
                           tabPanel("Overview",
                                    
                                    # ROW 1: BUDGET BOXES
@@ -105,7 +111,7 @@ ui <- dashboardPage(
                                    
                                    # ROW 4: TORNADO CHARTS
                                    fluidRow(
-                                     box(title = "Cost vs Cases Averted",
+                                     box(title = "Cost vs Cases Averted — Optimal Allocations per District",
                                          width = 12, solidHeader = TRUE, status = "info",
                                          p("Each row shows one district's optimizer-selected intervention combination.
                            Left side (gold) = total cost in USD. Right side (purple) = cases averted vs reference.
@@ -125,36 +131,39 @@ ui <- dashboardPage(
                                    ),
                                    
                                    # ROW 5: FACET MAP
-                                   # fluidRow(
-                                   #   box(title = "3) Optimal Allocation at Current Budget", width = 12,
-                                   #       solidHeader = TRUE, status = "warning",
-                                   #       p("Reveals the strategic national footprint of intervention groups optimized for the current budget envelope.",
-                                   #         style = "font-size: 14px; color: #666; font-weight: bold;"),
-                                   #       plotOutput("map_facets", height = 800))
-                                   # )
+                                   fluidRow(
+                                     box(title = "3) Optimal Allocation at Current Budget", width = 12,
+                                         solidHeader = TRUE, status = "warning",
+                                         p("Reveals the strategic national footprint of intervention groups optimized for the current budget envelope.",
+                                           style = "font-size: 14px; color: #666; font-weight: bold;"),
+                                         plotOutput("map_facets", height = 800))
+                                   )
                           ),
                           
-                          # SUB-TAB 2: BUDGET SENSITIVITY 
+                          # ── SUB-TAB 2: BUDGET SENSITIVITY ────────────────────────
                           tabPanel("Budget Sensitivity",
                                    
                                    fluidRow(
-                                     box(title = "Budget Sensitivity — Cases Averted vs Reference- — Optimal Allocations per District",
+                                     box(title = "Budget Sensitivity — Cases Averted vs Reference",
                                          width = 12, solidHeader = TRUE, status = "warning",
                                          p(icon("info-circle"),
                                            "Adjust the", strong("Budget Change (%)"), "slider in the sidebar.",
-                                           "Bars appear progressively at", strong("0%, +5%, and +10%"),
-                                           "as you increase the budget. The facet map below always reflects the current slider value.",
+                                           "Bars appear at every", strong("2% interval"), "from -30% to +10%.",
+                                           "Red bars show budget cuts, gold is baseline (0%), blue is increases.",
+                                           "The", strong("green dashed line"), "marks the efficiency frontier —
+  the actual cost of the optimal plan. Cases averted only drop below this line.",
+                                           strong("Click any bar"), "to update the intervention map below.",
                                            style = "font-size: 13px; color: #555; margin-bottom: 10px;"),
                                          
-                                         # Bar chart on top
-                                         plotOutput("sensitivity_bar", height = 300),
+                                         # Interactive plotly bar chart
+                                         plotlyOutput("sensitivity_bar", height = 350),
                                          
                                          hr(),
                                          
-                                         # Budget label
+                                         # Budget label — updates on bar click
                                          uiOutput("sensitivity_budget_label"),
                                          
-                                         # Facet map below
+                                         # Facet map below — updates on bar click
                                          plotOutput("sensitivity_facet", height = 800)
                                      )
                                    )
@@ -165,14 +174,24 @@ ui <- dashboardPage(
       # BUDGET PLANNER TAB
       tabItem(tabName = "planner",
               fluidRow(
-                box(title = "Budget Simulation Settings", width = 4, status = "warning", solidHeader = TRUE,
-                    p("Enter a specific budget amount to see the optimal distribution of interventions across all possible combinations."),
+                box(title = "Budget Simulation Settings", width = 4,
+                    status = "warning", solidHeader = TRUE,
+                    p("Enter a total national budget to find the optimal intervention
+                       mix across all districts. The optimizer selects one scenario
+                       per district to maximise total cases averted within the budget."),
+                    p(HTML("<b>Reference budget (BAU):</b> $67,810,335<br>
+                            <b>Minimum effective budget:</b> ~$51,913,488")),
                     numericInput("user_budget_amount", "Total National Budget (USD):",
-                                 value = 4600000000, min = 0, step = 100000000),
-                    actionButton("run_planner", "Run Optimization", icon = icon("play"), class = "btn-block btn-warning")
+                                 value = 67810335, min = 0, step = 1000000),
+                    actionButton("run_planner", "Run Optimization",
+                                 icon = icon("play"), class = "btn-block btn-warning")
                 ),
-                valueBoxOutput("planner_health_box", width = 4),
-                valueBoxOutput("planner_cost_box",   width = 4)
+                valueBoxOutput("planner_budget_box",  width = 4),
+                valueBoxOutput("planner_health_box",  width = 4)
+              ),
+              fluidRow(
+                valueBoxOutput("planner_cost_box", width = 6),
+                valueBoxOutput("planner_savings_box", width = 6)
               ),
               
               fluidRow(
@@ -194,3 +213,5 @@ ui <- dashboardPage(
     )
   )
 )
+
+
